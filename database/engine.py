@@ -5,10 +5,41 @@ from database.models import Base
 
 
 #from .env file:
-# DB_LITE=sqlite+aiosqlite:///my_base.db
-# DB_URL=postgresql+asyncpg://login:password@localhost:5432/db_name
+# DATABASE_URL=sqlite+aiosqlite:///my_base.db
+# DATABASE_URL=postgresql+asyncpg://login:password@localhost:5432/db_name
 
-engine = create_async_engine(os.getenv('DB_LITE'), echo=True)
+# Получаем URL базы данных из переменной окружения
+DATABASE_URL = os.getenv('DATABASE_URL')
+if not DATABASE_URL:
+    # Используем SQLite по умолчанию, если переменная не задана
+    DATABASE_URL = 'sqlite+aiosqlite:///my_base.db'
+    print("⚠️ DATABASE_URL не найден в .env, используется SQLite по умолчанию")
+
+# Определяем тип базы данных
+is_postgresql = "postgresql" in DATABASE_URL.lower()
+is_sqlite = "sqlite" in DATABASE_URL.lower()
+
+if is_postgresql:
+    print("🐘 Используется PostgreSQL")
+    # PostgreSQL специфичные настройки
+    engine = create_async_engine(
+        DATABASE_URL, 
+        echo=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True
+    )
+elif is_sqlite:
+    print("📁 Используется SQLite")
+    # SQLite специфичные настройки
+    engine = create_async_engine(
+        DATABASE_URL, 
+        echo=True,
+        connect_args={"check_same_thread": False}
+    )
+else:
+    print("❓ Неизвестный тип базы данных, используем стандартные настройки")
+    engine = create_async_engine(DATABASE_URL, echo=True)
 
 # engine = create_async_engine(os.getenv('DB_URL'), echo=True)
 

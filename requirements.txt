@@ -3,3 +3,4 @@ python-dotenv
 sqlalchemy
 asyncpg
 aiosqlite
+psycopg2-binary
