@@ -2,6 +2,8 @@ import logging
 from aiogram.filters import CommandStart, Command
 from aiogram import Router, F, types
 from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filters.chat_types import ChatTypeFilter
@@ -9,17 +11,26 @@ from kbds.inline import (
     get_main_menu_kb, get_back_to_menu_kb, get_premium_menu_kb, 
     get_subscription_plans_kb, get_back_to_premium_menu_kb
 )
+from kbds.reply import phone_request_kb
 from services.funnel import FunnelService
+from services.free_link import FreeLinkService
 from services.subscription import SubscriptionService
-from database.orm_query import orm_add_user, orm_get_active_subscription_plans
+from database.orm_query import (
+    orm_add_user, orm_get_active_subscription_plans, orm_get_user, 
+    orm_update_user_phone, orm_get_free_link_by_key
+)
 
 
 user_private_router = Router()
 user_private_router.message.filter(ChatTypeFilter(["private"]))
 
 
+class UserStates(StatesGroup):
+    waiting_for_phone = State()
+
+
 @user_private_router.message(CommandStart())
-async def start_cmd(message: Message, session: AsyncSession):
+async def start_cmd(message: Message, session: AsyncSession, state: FSMContext):
     """Команда /start"""
     try:
         # Добавляем пользователя в базу данных
@@ -32,25 +43,101 @@ async def start_cmd(message: Message, session: AsyncSession):
         # Проверяем, не админ ли это (админы попадают в admin_private.py)
         logging.info(f"User {message.from_user.id} used /start command")
         
-        # Проверяем, есть ли параметр для запуска воронки
+        # Проверяем, есть ли параметр для запуска воронки или freelink
         if message.text and " " in message.text:
             key = message.text.split(" ", 1)[1]
             logging.info(f"User {message.from_user.id} started with key: {key}")
             
-            # Запускаем воронку через новый сервис
-            success = await FunnelService.start_funnel(message, session, key)
-            if success:
+            # Avval free link ekanligini tekshiramiz
+            free_link_success = await FreeLinkService.process_free_link(message, session, key, state)
+            if free_link_success:
+                return
+            
+            # Free link bo'lmasa funnel ni tekshiramiz
+            funnel_success = await FunnelService.start_funnel(message, session, key, state)
+            if funnel_success:
                 return
         
-        # Отправляем главное меню для обычных пользователей
-        await message.answer(
-            f"👋 <b>Assalomu alaykum, {message.from_user.first_name}!</b>\n\n"
-            f"Quyidagi menyudan kerakli bo'limni tanlang:",
-            reply_markup=get_main_menu_kb()
-        )
+        # Проверяем есть ли у пользователя telefon raqam
+        user = await orm_get_user(session, message.from_user.id)
+        if not user or not user.phone:
+            # Telefon raqam yo'q - so'raymiz
+            await message.answer(
+                f"👋 <b>Assalomu alaykum, {message.from_user.first_name}!</b>\n\n"
+                f"Botdan foydalanish uchun telefon raqamingizni ulashing:",
+                reply_markup=phone_request_kb
+            )
+            await state.set_state(UserStates.waiting_for_phone)
+            return
+        
+        # Telefon raqam bor - asosiy menyuni ko'rsatamiz
+        await show_main_menu(message)
         
     except Exception as e:
         logging.error(f"Error in start command: {e}")
+
+
+@user_private_router.message(UserStates.waiting_for_phone, F.contact)
+async def phone_received(message: Message, session: AsyncSession, state: FSMContext):
+    """Telefon raqam qabul qilish"""
+    try:
+        phone = message.contact.phone_number
+        
+        # Telefon raqamni bazaga saqlash
+        await orm_update_user_phone(session, message.from_user.id, phone)
+        
+        await message.answer(
+            "✅ <b>Telefon raqamingiz muvaffaqiyatli saqlandi!</b>",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        
+        # State datani olish - pending funnel key yoki free link key bormi?
+        data = await state.get_data()
+        pending_funnel_key = data.get('pending_funnel_key')
+        pending_free_link_key = data.get('pending_free_link_key')
+        
+        await state.clear()
+        
+        if pending_free_link_key:
+            # Pending free link bor - uni davom ettirish
+            logging.info(f"Continuing free link '{pending_free_link_key}' for user {message.from_user.id} after phone registration")
+            success = await FreeLinkService._grant_free_link_access(
+                message, session, 
+                await orm_get_free_link_by_key(session, pending_free_link_key)
+            )
+        elif pending_funnel_key:
+            # Pending funnel bor - uni boshlash
+            logging.info(f"Continuing funnel '{pending_funnel_key}' for user {message.from_user.id} after phone registration")
+            success = await FunnelService._start_funnel_process(message, session, pending_funnel_key)
+            if not success:
+                # Funnel boshlanmasa asosiy menyuni ko'rsatish
+                await show_main_menu(message)
+        else:
+            # Pending yo'q - asosiy menyuni ko'rsatish
+            await show_main_menu(message)
+        
+    except Exception as e:
+        logging.error(f"Error in phone_received: {e}")
+        await message.answer("❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.")
+
+
+@user_private_router.message(UserStates.waiting_for_phone)
+async def phone_invalid(message: Message):
+    """Noto'g'ri format telefon raqam"""
+    await message.answer(
+        "❌ <b>Telefon raqamni to'g'ri formatda yuboring!</b>\n\n"
+        "Quyidagi tugma orqali telefon raqamingizni ulashing:",
+        reply_markup=phone_request_kb
+    )
+
+
+async def show_main_menu(message: Message):
+    """Asosiy menyuni ko'rsatish"""
+    await message.answer(
+        f"📋 <b>Asosiy menyu</b>\n\n"
+        f"Quyidagi menyudan kerakli bo'limni tanlang:",
+        reply_markup=get_main_menu_kb()
+    )
 
 
 # ===================== COMMANDS ХЕНДЛЕРЫ =====================
@@ -58,11 +145,7 @@ async def start_cmd(message: Message, session: AsyncSession):
 @user_private_router.message(Command("menu"))
 async def menu_command(message: Message):
     """Команда /menu"""
-    await message.answer(
-        f"📋 <b>Asosiy menyu</b>\n\n"
-        f"Quyidagi bo'limlardan birini tanlang:",
-        reply_markup=get_main_menu_kb()
-    )
+    await show_main_menu(message)
 
 
 @user_private_router.message(Command("premium"))
@@ -155,6 +238,8 @@ async def premium_handler(callback: CallbackQuery, session: AsyncSession):
 
 @user_private_router.callback_query(F.data == "premium_plans")
 async def premium_plans_handler(callback: CallbackQuery, session: AsyncSession):
+    """Обработка кнопки просмотра тарифных планов"""
+    print(f"DEBUG: Received callback data: {callback.data}")
     """Premium планлар кўрсатиш"""
     try:
         plans = await orm_get_active_subscription_plans(session)
@@ -290,23 +375,6 @@ async def back_to_menu_handler(callback: CallbackQuery):
     await callback.answer()
 
 
-@user_private_router.callback_query(F.data == "menu_premium")
-async def back_to_premium_menu_handler(callback: CallbackQuery):
-    """Premium menyuga qaytish"""
-    text = (
-        "💎 <b>Premium obuna</b>\n\n"
-        "Premium obuna bilan quyidagi imkoniyatlarga ega bo'lasiz:\n\n"
-        "✅ Barcha premium kurslar\n"
-        "✅ Ekskluziv darsliklar\n"
-        "✅ Test va amaliy mashqlar\n"
-        "✅ Sertifikatlar\n"
-        "✅ Shaxsiy nazorat\n\n"
-        "Quyidagi bo'limlardan birini tanlang:"
-    )
-    await callback.message.edit_text(text, reply_markup=get_premium_menu_kb())
-    await callback.answer()
-
-
 # ===================== FUNNEL ХЕНДЛЕРЫ =====================
 
 @user_private_router.callback_query(F.data.startswith("funnel_next:"))
@@ -355,6 +423,12 @@ async def cancel_payment_handler(callback: CallbackQuery):
 
 
 # ===================== УНИВЕРСАЛЬНЫЙ ХЕНДЛЕР =====================
+
+@user_private_router.callback_query()
+async def unknown_callback_handler(callback: CallbackQuery):
+    """Обработка неизвестных callback запросов"""
+    print(f"DEBUG: Unknown callback data: {callback.data}")
+    await callback.answer("🤔 Noma'lum buyruq.")
 
 @user_private_router.message()
 async def unknown_message_handler(message: Message):

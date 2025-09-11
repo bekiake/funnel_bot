@@ -119,3 +119,34 @@ class Subscription(Base):
     plan = relationship("SubscriptionPlan", back_populates="subscriptions")
 
 
+class FreeLink(Base):
+    __tablename__ = 'free_link'
+    
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(50), unique=True)  # freelink kalit
+    name: Mapped[str] = mapped_column(String(100))  # freelink nomi
+    channel_id: Mapped[str] = mapped_column(String(100))  # kanal ID yoki username
+    channel_invite_link: Mapped[str] = mapped_column(String(500))  # kanal invite linki
+    duration_days: Mapped[int] = mapped_column(Integer)  # muddati kunlarda
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)  # maksimal ishlatilish soni (-1 = cheksiz)
+    current_uses: Mapped[int] = mapped_column(Integer, default=0)  # hozirgi ishlatilgan soni
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # admin tomonidan boshqariladi
+    created_by: Mapped[int] = mapped_column(BigInteger)  # admin user_id
+    
+    # Связи
+    uses = relationship("FreeLinkUse", back_populates="free_link", cascade="all, delete-orphan")
+
+
+class FreeLinkUse(Base):
+    __tablename__ = 'free_link_use'
+    
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    free_link_id: Mapped[int] = mapped_column(ForeignKey('free_link.id'))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    used_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    is_expired: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    # Связи
+    free_link = relationship("FreeLink", back_populates="uses")
+

@@ -5,7 +5,11 @@ from sqlalchemy.orm import joinedload
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
-from database.models import User, Funnel, FunnelStep, FunnelStatistic, SubscriptionPlan, Subscription
+from database.models import (
+    User, Funnel, FunnelStep, FunnelStatistic, 
+    SubscriptionPlan, Subscription,
+    FreeLink, FreeLinkUse
+)
 
 
 # User operations
@@ -41,6 +45,16 @@ async def orm_get_users_count(session: AsyncSession) -> int:
     query = select(func.count()).select_from(User)
     result = await session.execute(query)
     return result.scalar() or 0
+
+
+async def orm_update_user_phone(session: AsyncSession, user_id: int, phone: str):
+    """Foydalanuvchi telefon raqamini yangilash"""
+    query = select(User).where(User.user_id == user_id)
+    result = await session.execute(query)
+    user = result.scalar_one_or_none()
+    if user:
+        user.phone = phone
+        await session.commit()
 
 
 async def orm_get_all_users(session: AsyncSession) -> list[User]:
@@ -436,4 +450,146 @@ async def send_message_to_all_users(
         tasks.append(asyncio.create_task(send(user_id)))
     await asyncio.gather(*tasks)
 
+
+# ===================== FREE LINK OPERATIONS =====================
+
+async def orm_create_free_link(
+    session: AsyncSession,
+    key: str,
+    name: str,
+    channel_id: str,
+    channel_invite_link: str,
+    duration_days: int,
+    created_by: int,
+    max_uses: int = 1
+) -> FreeLink:
+    """Yangi freelink yaratish"""
+    free_link = FreeLink(
+        key=key,
+        name=name,
+        channel_id=channel_id,
+        channel_invite_link=channel_invite_link,
+        duration_days=duration_days,
+        max_uses=max_uses,
+        created_by=created_by
+    )
+    session.add(free_link)
+    await session.commit()
+    await session.refresh(free_link)
+    return free_link
+
+
+async def orm_get_free_link_by_key(session: AsyncSession, key: str) -> FreeLink | None:
+    """Freelink ni kalit bo'yicha olish"""
+    query = select(FreeLink).where(
+        FreeLink.key == key,
+        FreeLink.is_active == True
+    )
+    result = await session.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def orm_check_free_link_usage(session: AsyncSession, free_link_id: int, user_id: int) -> bool:
+    """Foydalanuvchi ushbu freelink dan foydalanganmi tekshirish"""
+    query = select(FreeLinkUse).where(
+        FreeLinkUse.free_link_id == free_link_id,
+        FreeLinkUse.user_id == user_id
+    )
+    result = await session.execute(query)
+    return result.scalar_one_or_none() is not None
+
+
+async def orm_use_free_link(
+    session: AsyncSession,
+    free_link_id: int,
+    user_id: int,
+    expires_at: datetime
+) -> FreeLinkUse:
+    """Freelink dan foydalanish"""
+    # Freelink uses ni yangilash
+    query = select(FreeLink).where(FreeLink.id == free_link_id)
+    result = await session.execute(query)
+    free_link = result.scalar_one()
+    
+    free_link.current_uses += 1
+    
+    # FreeLinkUse yaratish
+    use = FreeLinkUse(
+        free_link_id=free_link_id,
+        user_id=user_id,
+        expires_at=expires_at
+    )
+    session.add(use)
+    
+    await session.commit()
+    await session.refresh(use)
+    return use
+
+
+async def orm_get_expired_free_link_uses(session: AsyncSession) -> list[FreeLinkUse]:
+    """Muddati tugagan freelink ishlatishlarini olish"""
+    from datetime import datetime
+    query = select(FreeLinkUse).where(
+        FreeLinkUse.expires_at <= datetime.now(),
+        FreeLinkUse.is_expired == False
+    )
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
+async def orm_mark_free_link_use_expired(session: AsyncSession, use_id: int):
+    """FreeLinkUse ni expired deb belgilash"""
+    query = select(FreeLinkUse).where(FreeLinkUse.id == use_id)
+    result = await session.execute(query)
+    use = result.scalar_one_or_none()
+    if use:
+        use.is_expired = True
+        await session.commit()
+
+
+async def orm_get_all_free_links(session: AsyncSession) -> list[FreeLink]:
+    """Barcha freelinklar ro'yxati"""
+    query = select(FreeLink).order_by(FreeLink.created.desc())
+    result = await session.execute(query)
+    return result.scalars().all()
+
+
+async def orm_delete_free_link(session: AsyncSession, free_link_id: int):
+    """Freelink ni o'chirish (deaktivatsiya)"""
+    query = select(FreeLink).where(FreeLink.id == free_link_id)
+    result = await session.execute(query)
+    free_link = result.scalar_one_or_none()
+    if free_link:
+        free_link.is_active = False
+        await session.commit()
+
+
+async def orm_permanent_delete_free_link(session: AsyncSession, free_link_id: int):
+    """Freelink ni butunlay o'chirish"""
+    query = select(FreeLink).where(FreeLink.id == free_link_id)
+    result = await session.execute(query)
+    free_link = result.scalar_one_or_none()
+    if free_link:
+        await session.delete(free_link)
+        await session.commit()
+
+
+async def orm_deactivate_free_link(session: AsyncSession, free_link_id: int):
+    """Freelink ni deaktivatsiya qilish"""
+    query = select(FreeLink).where(FreeLink.id == free_link_id)
+    result = await session.execute(query)
+    free_link = result.scalar_one_or_none()
+    if free_link:
+        free_link.is_active = False
+        await session.commit()
+
+
+async def orm_activate_free_link(session: AsyncSession, free_link_id: int):
+    """Freelink ni faollashtirish"""
+    query = select(FreeLink).where(FreeLink.id == free_link_id)
+    result = await session.execute(query)
+    free_link = result.scalar_one_or_none()
+    if free_link:
+        free_link.is_active = True
+        await session.commit()
 

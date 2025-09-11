@@ -7,6 +7,7 @@ from typing import Optional
 
 from aiogram import types
 from aiogram.exceptions import TelegramAPIError
+from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -15,9 +16,11 @@ from database.orm_query import (
     orm_start_funnel_statistic,
     orm_update_funnel_step,
     orm_complete_funnel,
-    orm_get_active_subscription_plans
+    orm_get_active_subscription_plans,
+    orm_get_user
 )
 from kbds.inline import get_funnel_next_step_kb, get_subscription_plans_kb
+from kbds.reply import phone_request_kb
 
 
 class FunnelService:
@@ -27,9 +30,42 @@ class FunnelService:
     async def start_funnel(
         message: types.Message,
         session: AsyncSession,
-        funnel_key: str
+        funnel_key: str,
+        state: Optional[FSMContext] = None
     ) -> bool:
         """Запуск воронки для пользователя"""
+        try:
+            # Avval foydalanuvchining telefon raqamini tekshiramiz
+            user = await orm_get_user(session, message.from_user.id)
+            if not user or not user.phone:
+                # Telefon raqam yo'q - so'raymiz va funnel keyni saqlaymiz
+                if state:
+                    await state.update_data(pending_funnel_key=funnel_key)
+                    from handlers.user_private import UserStates
+                    await state.set_state(UserStates.waiting_for_phone)
+                
+                await message.answer(
+                    f"👋 <b>Assalomu alaykum, {message.from_user.first_name}!</b>\n\n"
+                    f"Botdan foydalanish uchun avval telefon raqamingizni ulashing:",
+                    reply_markup=phone_request_kb
+                )
+                return True  # Telefon kiritilgandan keyin funnel davom etadi
+            
+            # Telefon bor - funnel ni boshlash
+            return await FunnelService._start_funnel_process(message, session, funnel_key)
+            
+        except Exception as e:
+            logging.error(f"Error starting funnel: {e}")
+            await message.answer("❌ Xatolik yuz berdi")
+            return False
+    
+    @staticmethod
+    async def _start_funnel_process(
+        message: types.Message,
+        session: AsyncSession,
+        funnel_key: str
+    ) -> bool:
+        """Воронка процессini boshlash (telefon raqam mavjud bo'lganda)"""
         try:
             # Получаем воронку из базы данных
             funnel = await orm_get_funnel_by_key(session, funnel_key)
@@ -77,7 +113,7 @@ class FunnelService:
             return True
             
         except Exception as e:
-            logging.error(f"Error starting funnel: {e}")
+            logging.error(f"Error starting funnel process: {e}")
             await message.answer("❌ Xatolik yuz berdi")
             return False
     

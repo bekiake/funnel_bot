@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import re
 from datetime import datetime
 
 from aiogram.filters import CommandObject, Command, CommandStart
@@ -17,9 +18,73 @@ from kbds.inline import (
     get_back_to_admin_menu_kb, get_broadcast_kb, get_users_list_kb, 
     get_user_profile_kb, get_funnels_list_kb, get_funnel_details_kb,
     get_subscriptions_list_kb, get_subscription_details_kb, get_cancel_add_plan_kb,
-    get_funnel_cancel_kb, get_funnel_content_kb
+    get_funnel_cancel_kb, get_funnel_content_kb,
+    get_free_links_menu_kb, get_free_links_list_kb, get_free_link_info_kb,
+    get_free_link_cancel_kb, get_max_users_selection_kb, get_duration_selection_kb,
+    get_delete_confirmation_kb
 )
 from services.subscription import SubscriptionService
+
+
+def parse_duration_to_days(duration_text: str) -> int:
+    """Duration textni kunlarga aylantirish"""
+    duration_text = duration_text.lower().strip()
+    
+    # Cheksiz
+    if duration_text in ['cheksiz', 'cheksizlikka', 'unlimited', 'forever']:
+        return 365000  # ~1000 yil
+    
+    # Faqat raqam
+    if duration_text.isdigit():
+        return int(duration_text)
+    
+    # Regex bilan parse qilish
+    patterns = {
+        r'(\d+)\s*(kun|day)s?': 1,
+        r'(\d+)\s*(hafta|week)s?': 7,
+        r'(\d+)\s*(oy|month)s?': 30,
+        r'(\d+)\s*(yil|year)s?': 365
+    }
+    
+    for pattern, multiplier in patterns.items():
+        match = re.search(pattern, duration_text)
+        if match:
+            number = int(match.group(1))
+            return number * multiplier
+    
+    # Hech narsa topilmasa xatolik
+    raise ValueError(f"Noto'g'ri duration format: {duration_text}")
+
+
+def format_duration_days(days: int) -> str:
+    """Kunlarni o'qishga qulay formatga aylantirish"""
+    if days >= 365000:
+        return "Cheksiz"
+    elif days >= 365:
+        years = days // 365
+        remaining_days = days % 365
+        if remaining_days == 0:
+            return f"{years} yil"
+        else:
+            return f"{years} yil {remaining_days} kun"
+    elif days >= 30:
+        months = days // 30
+        remaining_days = days % 30
+        if remaining_days == 0:
+            return f"{months} oy"
+        else:
+            return f"{months} oy {remaining_days} kun"
+    elif days >= 7:
+        weeks = days // 7
+        remaining_days = days % 7
+        if remaining_days == 0:
+            return f"{weeks} hafta"
+        else:
+            return f"{weeks} hafta {remaining_days} kun"
+    else:
+        return f"{days} kun"
+
+
 from database.orm_query import (
     orm_get_users_count,
     orm_get_all_users,
@@ -28,7 +93,9 @@ from database.orm_query import (
     orm_create_funnel,
     orm_add_funnel_step,
     orm_create_subscription_plan,
-    orm_get_active_subscription_plans
+    orm_get_active_subscription_plans,
+    orm_create_free_link, orm_get_all_free_links, orm_get_free_link_by_key,
+    orm_delete_free_link, orm_permanent_delete_free_link, orm_deactivate_free_link, orm_activate_free_link
 )
 
 
@@ -52,6 +119,13 @@ class SubscriptionPlanStates(StatesGroup):
     waiting_for_price_usd = State()
     waiting_for_price_uzs = State()
     waiting_for_channel_id = State()
+
+
+class FreeLinkStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_key = State()
+    waiting_for_max_uses = State()
+    waiting_for_duration_days = State()
 
 
 admin_router = Router()
@@ -1259,7 +1333,593 @@ async def verify_payment_command(message: Message, command: CommandObject, sessi
         )
 
 
-# Возврат в главное меню для всех остальных сообщений
+# ===================== FREE LINK HANDLERS =====================
+
+@admin_router.callback_query(F.data == "admin_free_links")
+async def admin_free_links_menu(callback: CallbackQuery):
+    """Free linklar menyusi"""
+    try:
+        await callback.message.edit_text(
+            "🎁 <b>Free linklar boshqaruvi</b>\n\n"
+            "Free linklar orqali foydalanuvchilarga vaqtinchalik kanalga kirish imkonini bering.",
+            reply_markup=get_free_links_menu_kb()
+        )
+    except Exception as e:
+        logging.error(f"Error in admin_free_links_menu: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data == "create_free_link")
+async def create_free_link_start(callback: CallbackQuery, state: FSMContext):
+    """Free link yaratishni boshlash"""
+    try:
+        await callback.message.edit_text(
+            "📝 <b>Yangi free link yaratish</b>\n\n"
+            "Free link nomini kiriting:",
+            reply_markup=get_free_link_cancel_kb()
+        )
+        await state.set_state(FreeLinkStates.waiting_for_name)
+    except Exception as e:
+        logging.error(f"Error in create_free_link_start: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.message(FreeLinkStates.waiting_for_name)
+async def free_link_name(message: Message, state: FSMContext):
+    """Free link nomini qabul qilish"""
+    try:
+        await state.update_data(name=message.text)
+        
+        await message.answer(
+            "🔑 <b>Free link kalitini kiriting</b>\n\n"
+            "Bu kalit link manzilida ishlatiladi: t.me/botusername?start=KALIT\n"
+            "Misol: freelink123",
+            reply_markup=get_free_link_cancel_kb()
+        )
+        await state.set_state(FreeLinkStates.waiting_for_key)
+    except Exception as e:
+        logging.error(f"Error in free_link_name: {e}")
+        await message.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.message(FreeLinkStates.waiting_for_key)
+async def free_link_key(message: Message, state: FSMContext, session: AsyncSession):
+    """Free link kalitini qabul qilish"""
+    try:
+        key = message.text.strip()
+        
+        # Kalit unique ekanligini tekshirish
+        existing = await orm_get_free_link_by_key(session, key)
+        if existing:
+            await message.answer(
+                "❌ <b>Bu kalit allaqachon mavjud!</b>\n\n"
+                "Boshqa kalit kiriting:",
+                reply_markup=get_free_link_cancel_kb()
+            )
+            return
+        
+        await state.update_data(key=key)
+        
+        await message.answer(
+            "👥 <b>Maksimal foydalanuvchilar sonini tanlang</b>\n\n"
+            "Nechta foydalanuvchi ushbu linkdan foydalana oladi?",
+            reply_markup=get_max_users_selection_kb()
+        )
+        await state.set_state(FreeLinkStates.waiting_for_max_uses)
+    except Exception as e:
+        logging.error(f"Error in free_link_key: {e}")
+        await message.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("max_users_"))
+async def free_link_max_users_callback(callback: CallbackQuery, state: FSMContext):
+    """Maksimal foydalanuvchilar sonini callback orqali qabul qilish"""
+    try:
+        max_users_data = callback.data.split("_")[-1]
+        
+        if max_users_data == "unlimited":
+            max_uses = -1
+            max_uses_text = "Cheksiz"
+        else:
+            max_uses = int(max_users_data)
+            max_uses_text = str(max_uses)
+        
+        await state.update_data(max_uses=max_uses)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Maksimal foydalanuvchilar:</b> {max_uses_text}\n\n"
+            "⏰ <b>Muddatni tanlang</b>\n\n"
+            "Foydalanuvchi necha muddat kanalda bo'ladi?",
+            reply_markup=get_duration_selection_kb()
+        )
+        await state.set_state(FreeLinkStates.waiting_for_duration_days)
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error in free_link_max_users_callback: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("duration_"))
+async def free_link_duration_callback(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Muddat callback orqali qabul qilish va free link yaratish"""
+    try:
+        duration_data = callback.data.split("_")
+        
+        if duration_data[-1] == "unlimited":
+            duration_days = 365000  # ~1000 yil
+            duration_text = "Cheksiz"
+        elif duration_data[-1] == "day":
+            duration_days = int(duration_data[1])
+            duration_text = f"{duration_days} kun"
+        elif duration_data[-1] == "days":
+            duration_days = int(duration_data[1])
+            if duration_days == 3:
+                duration_text = "3 kun"
+            elif duration_days == 7:
+                duration_text = "7 kun"
+            elif duration_days == 14:
+                duration_text = "2 hafta"
+            elif duration_days == 30:
+                duration_text = "1 oy"
+            elif duration_days == 90:
+                duration_text = "3 oy"
+            elif duration_days == 180:
+                duration_text = "6 oy"
+            elif duration_days == 365:
+                duration_text = "1 yil"
+            else:
+                duration_text = f"{duration_days} kun"
+        
+        # State datani olish
+        data = await state.get_data()
+        
+        # max_uses ni olish (agar yo'q bo'lsa, default 1)
+        max_uses = data.get('max_uses', 1)
+        
+        # Default kanal ID va invite linkni olish
+        default_channel_id = os.getenv('DEFAULT_CHANNEL_ID')
+        if not default_channel_id:
+            await callback.message.edit_text(
+                "❌ <b>Default kanal ID topilmadi!</b>\n\n"
+                "Iltimos .env faylida DEFAULT_CHANNEL_ID ni sozlang.",
+                reply_markup=get_free_links_menu_kb()
+            )
+            await state.clear()
+            return
+        
+        # Bot orqali kanal uchun invite link yaratish
+        try:
+            # Permanent invite link yaratish (expire_date berilmasa)
+            invite_response = await callback.bot.create_chat_invite_link(
+                chat_id=default_channel_id,
+                name=f"FreeLinkChannel_{data['key']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            channel_invite_link = invite_response.invite_link
+            
+        except Exception as e:
+            logging.error(f"Error creating invite link for channel {default_channel_id}: {e}")
+            await callback.message.edit_text(
+                "❌ <b>Kanal uchun invite link yaratishda xatolik!</b>\n\n"
+                "Bot kanalni admin qilganligini tekshiring va qaytadan urinib ko'ring.",
+                reply_markup=get_free_links_menu_kb()
+            )
+            await state.clear()
+            return
+        
+        # Free link yaratish
+        free_link = await orm_create_free_link(
+            session=session,
+            key=data['key'],
+            name=data['name'],
+            channel_id=default_channel_id,
+            channel_invite_link=channel_invite_link,
+            duration_days=duration_days,
+            max_uses=max_uses,
+            created_by=callback.from_user.id
+        )
+        
+        bot_username = (await callback.bot.get_me()).username
+        link_url = f"https://t.me/{bot_username}?start={data['key']}"
+        
+        max_uses_text = "Cheksiz" if max_uses == -1 else str(max_uses)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Free link muvaffaqiyatli yaratildi!</b>\n\n"
+            f"📝 <b>Nom:</b> {data['name']}\n"
+            f"🔑 <b>Kalit:</b> {data['key']}\n"
+            f"👥 <b>Maksimal foydalanuvchilar:</b> {max_uses_text}\n"
+            f"📅 <b>Muddat:</b> {duration_text}\n"
+            f"📢 <b>Kanal:</b> <code>{default_channel_id}</code>\n"
+            f"🔗 <b>Kanal invite:</b> <code>{channel_invite_link}</code>\n\n"
+            f"🌐 <b>Free link:</b>\n<code>{link_url}</code>",
+            reply_markup=get_free_links_menu_kb()
+        )
+        
+        await state.clear()
+        await callback.answer("✅ Free link yaratildi!")
+        
+    except Exception as e:
+        logging.error(f"Error in free_link_duration_callback: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data == "free_links_list")
+async def free_links_list(callback: CallbackQuery, session: AsyncSession):
+    """Free linklar ro'yxati"""
+    try:
+        free_links = await orm_get_all_free_links(session)
+        
+        if not free_links:
+            await callback.message.edit_text(
+                "📋 <b>Free linklar ro'yxati</b>\n\n"
+                "❌ Hozircha free linklar mavjud emas.",
+                reply_markup=get_free_links_menu_kb()
+            )
+            return
+        
+        await callback.message.edit_text(
+            "📋 <b>Free linklar ro'yxati</b>\n\n"
+            "Free link tanlang:",
+            reply_markup=get_free_links_list_kb(free_links)
+        )
+    except Exception as e:
+        logging.error(f"Error in free_links_list: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("free_link_info_"))
+async def free_link_info(callback: CallbackQuery, session: AsyncSession):
+    """Free link ma'lumotlari"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        status = "🟢 Faol" if free_link.is_active else "🔴 Nofaol"
+        bot_username = (await callback.bot.get_me()).username
+        link_url = f"https://t.me/{bot_username}?start={free_link.key}"
+        
+        max_uses_display = "Cheksiz" if free_link.max_uses == -1 else str(free_link.max_uses)
+        
+        text = (
+            f"🎁 <b>Free link ma'lumotlari</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> {free_link.key}\n"
+            f"📢 <b>Kanal:</b> {free_link.channel_id}\n"
+            f"📅 <b>Muddat:</b> {free_link.duration_days} kun\n"
+            f"📊 <b>Ishlatilgan:</b> {free_link.current_uses}/{max_uses_display}\n"
+            f"📈 <b>Holat:</b> {status}\n"
+            f"⏰ <b>Yaratilgan:</b> {free_link.created.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🔗 <b>Link:</b>\n<code>{link_url}</code>"
+        )
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_free_link_info_kb(free_link_id, free_link.is_active)
+        )
+    except Exception as e:
+        logging.error(f"Error in free_link_info: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("toggle_free_link_"))
+async def toggle_free_link_status(callback: CallbackQuery, session: AsyncSession):
+    """Free link holatini o'zgartirish (faol/nofaol)"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        # Holatni o'zgartirish
+        free_link.is_active = not free_link.is_active
+        await session.commit()
+        
+        status_text = "yoqildi" if free_link.is_active else "o'chirildi"
+        await callback.answer(f"✅ Free link {status_text}")
+        
+        # Ma'lumotlarni yangilash
+        status = "🟢 Faol" if free_link.is_active else "🔴 Nofaol"
+        bot_username = (await callback.bot.get_me()).username
+        link_url = f"https://t.me/{bot_username}?start={free_link.key}"
+        
+        max_uses_display = "Cheksiz" if free_link.max_uses == -1 else str(free_link.max_uses)
+        
+        text = (
+            f"🎁 <b>Free link ma'lumotlari</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> {free_link.key}\n"
+            f"📢 <b>Kanal:</b> {free_link.channel_id}\n"
+            f"📅 <b>Muddat:</b> {free_link.duration_days} kun\n"
+            f"📊 <b>Ishlatilgan:</b> {free_link.current_uses}/{max_uses_display}\n"
+            f"📈 <b>Holat:</b> {status}\n"
+            f"⏰ <b>Yaratilgan:</b> {free_link.created.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🔗 <b>Link:</b>\n<code>{link_url}</code>"
+        )
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_free_link_info_kb(free_link_id, free_link.is_active)
+        )
+        
+    except Exception as e:
+        logging.error(f"Error in toggle_free_link_status: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("deactivate_free_link_"))
+async def deactivate_free_link_request(callback: CallbackQuery, session: AsyncSession):
+    """Free link deaktivatsiya qilish so'rovi"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        await callback.message.edit_text(
+            f"🚫 <b>Free link deaktivatsiya qilish</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> {free_link.key}\n\n"
+            f"⚠️ Bu freelink deaktivatsiya qilinadi. Yangi foydalanuvchilar linkdan foydalana olmaydi, "
+            f"lekin mavjud foydalanuvchilar hali ham faol.\n\n"
+            f"Ma'lumotlar bazada saqlanib qoladi va keyin qayta faollashtirish mumkin.\n\n"
+            f"Davom etasizmi?",
+            reply_markup=get_delete_confirmation_kb(free_link_id, "deactivate")
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error in deactivate_free_link_request: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("permanent_delete_free_link_"))
+async def permanent_delete_free_link_request(callback: CallbackQuery, session: AsyncSession):
+    """Free link butunlay o'chirish so'rovi"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        await callback.message.edit_text(
+            f"🗑️ <b>Free link butunlay o'chirish</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> {free_link.key}\n\n"
+            f"⚠️ <b>OGOHLANTIRISH!</b>\n"
+            f"Bu freelink va unga bog'liq barcha ma'lumotlar butunlay o'chiriladi:\n"
+            f"• Freelink ma'lumotlari\n"
+            f"• Foydalanuvchilar statistikasi\n"
+            f"• Foydalanish tarixi\n\n"
+            f"❗ Bu amalni bekor qilib bo'lmaydi!\n\n"
+            f"Davom etasizmi?",
+            reply_markup=get_delete_confirmation_kb(free_link_id, "permanent")
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error in permanent_delete_free_link_request: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("confirm_deactivate_"))
+async def confirm_deactivate_free_link(callback: CallbackQuery, session: AsyncSession):
+    """Free link deaktivatsiya qilishni tasdiqlash"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish va deaktivatsiya qilish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        # Deaktivatsiya qilish
+        await orm_deactivate_free_link(session, free_link_id)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Free link deaktivatsiya qilindi</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> {free_link.key}\n\n"
+            f"🚫 Free link deaktivatsiya qilindi. Yangi foydalanuvchilar linkdan foydalana olmaydi.\n"
+            f"Ma'lumotlar saqlanib qoldi va keyin qayta faollashtirish mumkin.",
+            reply_markup=get_free_links_menu_kb()
+        )
+        await callback.answer("✅ Free link deaktivatsiya qilindi")
+        
+    except Exception as e:
+        logging.error(f"Error in confirm_deactivate_free_link: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("confirm_permanent_delete_"))
+async def confirm_permanent_delete_free_link(callback: CallbackQuery, session: AsyncSession):
+    """Free link butunlay o'chirishni tasdiqlash"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link o'chirish
+        await orm_permanent_delete_free_link(session, free_link_id)
+        
+        await callback.message.edit_text(
+            f"✅ <b>Free link butunlay o'chirildi</b>\n\n"
+            f"🗑️ Free link va unga bog'liq barcha ma'lumotlar butunlay o'chirildi.\n"
+            f"Bu amal bekor qilinmaydi.",
+            reply_markup=get_free_links_menu_kb()
+        )
+        await callback.answer("✅ Free link butunlay o'chirildi")
+        
+    except Exception as e:
+        logging.error(f"Error in confirm_permanent_delete_free_link: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+# Eski delete_free_link funksiyasini yangilaymiz (eski callback uchun)
+@admin_router.callback_query(F.data.startswith("toggle_status_"))
+async def toggle_free_link_status(callback: CallbackQuery, session: AsyncSession):
+    """Free link statusini o'zgartirish"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        # Statusni o'zgartirish
+        if free_link.is_active:
+            await orm_deactivate_free_link(session, free_link_id)
+            new_status = "deaktivatsiya qilindi"
+            status_emoji = "🔴"
+        else:
+            await orm_activate_free_link(session, free_link_id)
+            new_status = "faollashtirildi"
+            status_emoji = "🟢"
+        
+        # Yangilangan ma'lumotlarni ko'rsatish
+        status_text = f"{status_emoji} {'Faol' if not free_link.is_active else 'Faol emas'}"
+        max_uses_text = "Cheksiz" if free_link.max_uses == -1 else str(free_link.max_uses)
+        
+        await callback.message.edit_text(
+            f"📋 <b>Free Link Ma'lumotlari</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> <code>{free_link.key}</code>\n"
+            f"📊 <b>Status:</b> {status_text}\n"
+            f"👥 <b>Maksimal foydalanuvchilar:</b> {max_uses_text}\n"
+            f"📈 <b>Hozirgi foydalanuvchilar:</b> {free_link.current_uses}\n"
+            f"📅 <b>Yaratilgan sana:</b> {free_link.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🔗 <b>Freelink URL:</b>\n"
+            f"<code>https://t.me/{(await callback.bot.get_me()).username}?start={free_link.key}</code>",
+            reply_markup=get_free_link_info_kb(free_link.id, not free_link.is_active)
+        )
+        await callback.answer(f"✅ Free link {new_status}")
+        
+    except Exception as e:
+        logging.error(f"Error in toggle_free_link_status: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("cancel_delete_"))
+async def cancel_delete_free_link(callback: CallbackQuery, session: AsyncSession):
+    """Free link o'chirishni bekor qilish"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        # Free link ma'lumotlarini olish
+        from database.orm_query import select, FreeLink
+        query = select(FreeLink).where(FreeLink.id == free_link_id)
+        result = await session.execute(query)
+        free_link = result.scalar_one_or_none()
+        
+        if not free_link:
+            await callback.answer("❌ Free link topilmadi")
+            return
+        
+        # Freelink ma'lumotlarini ko'rsatish
+        status_text = "🟢 Faol" if free_link.is_active else "🔴 Faol emas"
+        max_uses_text = "Cheksiz" if free_link.max_uses == -1 else str(free_link.max_uses)
+        
+        await callback.message.edit_text(
+            f"📋 <b>Free Link Ma'lumotlari</b>\n\n"
+            f"📝 <b>Nom:</b> {free_link.name}\n"
+            f"🔑 <b>Kalit:</b> <code>{free_link.key}</code>\n"
+            f"📊 <b>Status:</b> {status_text}\n"
+            f"👥 <b>Maksimal foydalanuvchilar:</b> {max_uses_text}\n"
+            f"📈 <b>Hozirgi foydalanuvchilar:</b> {free_link.current_uses}\n"
+            f"📅 <b>Yaratilgan sana:</b> {free_link.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🔗 <b>Freelink URL:</b>\n"
+            f"<code>https://t.me/{(await callback.bot.get_me()).username}?start={free_link.key}</code>",
+            reply_markup=get_free_link_info_kb(free_link.id, free_link.is_active)
+        )
+        await callback.answer("❌ O'chirish bekor qilindi")
+        
+    except Exception as e:
+        logging.error(f"Error in cancel_delete_free_link: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+@admin_router.callback_query(F.data.startswith("delete_free_link_"))
+async def delete_free_link(callback: CallbackQuery, session: AsyncSession):
+    """Free link o'chirish"""
+    try:
+        free_link_id = int(callback.data.split("_")[-1])
+        
+        await orm_delete_free_link(session, free_link_id)
+        
+        await callback.answer("✅ Free link o'chirildi")
+        
+        # Ro'yxatga qaytish
+        free_links = await orm_get_all_free_links(session)
+        
+        if not free_links:
+            await callback.message.edit_text(
+                "📋 <b>Free linklar ro'yxati</b>\n\n"
+                "❌ Hozircha free linklar mavjud emas.",
+                reply_markup=get_free_links_menu_kb()
+            )
+            return
+        
+        await callback.message.edit_text(
+            "📋 <b>Free linklar ro'yxati</b>\n\n"
+            "Free link tanlang:",
+            reply_markup=get_free_links_list_kb(free_links)
+        )
+    except Exception as e:
+        logging.error(f"Error in delete_free_link: {e}")
+        await callback.answer("❌ Xatolik yuz berdi")
+
+
+# Free link state uchun cancel handler
+@admin_router.message(
+    F.text.in_(["❌ Bekor qilish", "/cancel"]), 
+    FreeLinkStates()
+)
+async def cancel_free_link_creation(message: Message, state: FSMContext):
+    """Free link yaratishni bekor qilish"""
+    await state.clear()
+    await message.answer(
+        "❌ <b>Free link yaratish bekor qilindi</b>",
+        reply_markup=get_free_links_menu_kb()
+    )
+
+
+# Возврат в главное меню для всех остальных сообщений (ENG OXIRIDA BO'LISHI KERAK!)
 @admin_router.message()
 async def admin_unknown_message(message: Message):
     """Обработка неизвестных сообщений от админа"""

@@ -22,6 +22,7 @@ from handlers.user_private import user_private_router
 from handlers.admin_private import admin_router
 from handlers.admin_subscription import admin_subscription_router
 from services.subscription import SubscriptionService
+from services.scheduler import FreeLinkScheduler
 
 from common.bot_cmds_list import private
 
@@ -100,6 +101,9 @@ async def main():
         # Настраиваем команды бота
         await bot.delete_my_commands(scope=types.BotCommandScopeAllPrivateChats())
         await bot.set_my_commands(commands=private, scope=types.BotCommandScopeAllPrivateChats())
+        
+        # Schedulerni boshlash (background task)
+        scheduler_task = asyncio.create_task(FreeLinkScheduler.start_scheduler(bot))
         
         logging.info("Starting polling...")
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
