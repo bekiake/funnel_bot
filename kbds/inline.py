@@ -132,6 +132,36 @@ def get_funnel_creation_kb():
     return builder.as_markup()
 
 
+def get_funnel_cancel_kb():
+    """Bekor qilish klaviaturasi funnel yaratish uchun"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="❌ Bekor qilish",
+        callback_data="funnel_cancel"
+    ))
+    
+    return builder.as_markup()
+
+
+def get_funnel_content_kb():
+    """Kontent yuborganda bekor qilish klaviaturasi"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="🔙 Orqaga",
+        callback_data="funnel_back_to_steps"
+    ))
+    
+    builder.add(InlineKeyboardButton(
+        text="❌ Bekor qilish",
+        callback_data="funnel_cancel"
+    ))
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 # ===================== ВОРОНКИ =====================
 
 def get_funnel_next_step_kb(step_number: int, total_steps: int, button_text: str = "Keyingi ➡️"):

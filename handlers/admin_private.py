@@ -16,7 +16,8 @@ from kbds.inline import (
     get_admin_menu_kb, get_funnel_creation_kb, get_admin_subscription_kb, 
     get_back_to_admin_menu_kb, get_broadcast_kb, get_users_list_kb, 
     get_user_profile_kb, get_funnels_list_kb, get_funnel_details_kb,
-    get_subscriptions_list_kb, get_subscription_details_kb, get_cancel_add_plan_kb
+    get_subscriptions_list_kb, get_subscription_details_kb, get_cancel_add_plan_kb,
+    get_funnel_cancel_kb, get_funnel_content_kb
 )
 from services.subscription import SubscriptionService
 from database.orm_query import (
@@ -844,7 +845,7 @@ async def funnel_create_start(message: Message, state: FSMContext):
     await message.answer(
         "🎯 <b>Yangi funnel yaratish</b>\n\n"
         "Funnel nomini kiriting:",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=get_funnel_cancel_kb()
     )
     await state.set_state(FunnelStates.waiting_for_name)
 
@@ -855,7 +856,8 @@ async def funnel_create_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await message.answer(
         "🔑 Funnel kalitini kiriting (masalan: python_course):\n\n"
-        "Bu kalit orqali foydalanuvchilar funnel ga kirishadi."
+        "Bu kalit orqali foydalanuvchilar funnel ga kirishadi.",
+        reply_markup=get_funnel_cancel_kb()
     )
     await state.set_state(FunnelStates.waiting_for_key)
 
@@ -867,7 +869,8 @@ async def funnel_create_key(message: Message, state: FSMContext):
     await state.update_data(key=key)
     await message.answer(
         "📝 Funnel haqida qisqacha tavsif kiriting "
-        "(yoki /skip deb yozing):"
+        "(yoki /skip deb yozing):",
+        reply_markup=get_funnel_cancel_kb()
     )
     await state.set_state(FunnelStates.waiting_for_description)
 
@@ -954,7 +957,10 @@ async def funnel_adding_steps(message: Message, state: FSMContext):
 @admin_router.callback_query(F.data == "funnel_add_text")
 async def funnel_add_text_callback(callback: CallbackQuery, state: FSMContext):
     """Добавление текста в воронку"""
-    await callback.message.edit_text("📝 Matn xabarini yuboring:")
+    await callback.message.edit_text(
+        "📝 Matn xabarini yuboring:",
+        reply_markup=get_funnel_content_kb()
+    )
     await state.update_data(content_type="text")
     await state.set_state(FunnelStates.waiting_for_content)
     await callback.answer()
@@ -963,7 +969,10 @@ async def funnel_add_text_callback(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "funnel_add_photo")
 async def funnel_add_photo_callback(callback: CallbackQuery, state: FSMContext):
     """Добавление фото в воронку"""
-    await callback.message.edit_text("📷 Rasmni yuboring:")
+    await callback.message.edit_text(
+        "📷 Rasmni yuboring:",
+        reply_markup=get_funnel_content_kb()
+    )
     await state.update_data(content_type="photo")
     await state.set_state(FunnelStates.waiting_for_content)
     await callback.answer()
@@ -972,7 +981,10 @@ async def funnel_add_photo_callback(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "funnel_add_video")
 async def funnel_add_video_callback(callback: CallbackQuery, state: FSMContext):
     """Добавление видео в воронку"""
-    await callback.message.edit_text("🎥 Videoni yuboring:")
+    await callback.message.edit_text(
+        "🎥 Videoni yuboring:",
+        reply_markup=get_funnel_content_kb()
+    )
     await state.update_data(content_type="video")
     await state.set_state(FunnelStates.waiting_for_content)
     await callback.answer()
@@ -981,7 +993,10 @@ async def funnel_add_video_callback(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "funnel_add_audio")
 async def funnel_add_audio_callback(callback: CallbackQuery, state: FSMContext):
     """Добавление аудио в воронку"""
-    await callback.message.edit_text("🎵 Audioni yuboring:")
+    await callback.message.edit_text(
+        "🎵 Audioni yuboring:",
+        reply_markup=get_funnel_content_kb()
+    )
     await state.update_data(content_type="audio")
     await state.set_state(FunnelStates.waiting_for_content)
     await callback.answer()
@@ -990,7 +1005,10 @@ async def funnel_add_audio_callback(callback: CallbackQuery, state: FSMContext):
 @admin_router.callback_query(F.data == "funnel_add_document")
 async def funnel_add_document_callback(callback: CallbackQuery, state: FSMContext):
     """Добавление документа в воронку"""
-    await callback.message.edit_text("📎 Faylni yuboring:")
+    await callback.message.edit_text(
+        "📎 Faylni yuboring:",
+        reply_markup=get_funnel_content_kb()
+    )
     await state.update_data(content_type="document")
     await state.set_state(FunnelStates.waiting_for_content)
     await callback.answer()
@@ -1015,6 +1033,17 @@ async def funnel_cancel_callback(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_admin_menu_kb()
     )
     await state.clear()
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "funnel_back_to_steps")
+async def funnel_back_to_steps_callback(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору типа контента"""
+    await callback.message.edit_text(
+        "Qanday turdagi kontent qo'shasiz?",
+        reply_markup=get_funnel_creation_kb()
+    )
+    await state.set_state(FunnelStates.adding_steps)
     await callback.answer()
 
 
@@ -1048,13 +1077,15 @@ async def funnel_content_handler(message: Message, state: FSMContext):
         if content_type != "text" and not message.caption:
             await message.answer(
                 "📝 Ushbu media uchun izoh qo'shasizmi?\n"
-                "(Izoh yuboring yoki /skip deb yozing):"
+                "(Izoh yuboring yoki /skip deb yozing):",
+                reply_markup=get_funnel_content_kb()
             )
             await state.set_state(FunnelStates.waiting_for_caption)
         else:
             await message.answer(
                 "🔘 Keyingi qadamga o'tish tugmasi matnini kiriting\n"
-                "(masalan: 'Davom etish ➡️' yoki /skip):"
+                "(masalan: 'Davom etish ➡️' yoki /skip):",
+                reply_markup=get_funnel_content_kb()
             )
             await state.set_state(FunnelStates.waiting_for_button_text)
     
@@ -1074,7 +1105,8 @@ async def funnel_caption_handler(message: Message, state: FSMContext):
     
     await message.answer(
         "🔘 Keyingi qadamga o'tish tugmasi matnini kiriting\n"
-        "(masalan: 'Davom etish ➡️' yoki /skip):"
+        "(masalan: 'Davom etish ➡️' yoki /skip):",
+        reply_markup=get_funnel_content_kb()
     )
     await state.set_state(FunnelStates.waiting_for_button_text)
 
