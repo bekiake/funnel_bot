@@ -16,12 +16,13 @@ from kbds.inline import (
     get_admin_menu_kb, get_funnel_creation_kb, get_admin_subscription_kb, 
     get_back_to_admin_menu_kb, get_broadcast_kb, get_users_list_kb, 
     get_user_profile_kb, get_funnels_list_kb, get_funnel_details_kb,
-    get_subscriptions_list_kb, get_subscription_details_kb
+    get_subscriptions_list_kb, get_subscription_details_kb, get_cancel_add_plan_kb
 )
 from services.subscription import SubscriptionService
 from database.orm_query import (
     orm_get_users_count,
     orm_get_all_users,
+    orm_get_user_funnel_stats,
     send_message_to_all_users,
     orm_create_funnel,
     orm_add_funnel_step,
@@ -120,27 +121,129 @@ async def admin_stats_callback(callback: CallbackQuery, session: AsyncSession):
 
 @admin_router.callback_query(F.data == "admin_users")
 async def admin_users_callback(callback: CallbackQuery, session: AsyncSession):
-    """Список пользователей с inline клавиатурой"""
+    """Foydalanuvchilar ro'yxati (pagination bilan)"""
     try:
         users = await orm_get_all_users(session)
-        if users:
-            text = f"👥 <b>Foydalanuvchilar ro'yxati</b>\n\n"
-            text += f"📊 Jami: <b>{len(users)}</b> ta foydalanuvchi\n\n"
-            text += "Profil ko'rish uchun ismga bosing:"
-            
-            await callback.message.edit_text(
-                text, 
-                reply_markup=get_users_list_kb(users, page=0)
-            )
-        else:
-            await callback.message.edit_text(
-                "🚫 Hech qanday foydalanuvchi topilmadi",
-                reply_markup=get_back_to_admin_menu_kb()
-            )
+        await show_users_page(callback.message, session, users, page=0, edit=True)
         await callback.answer()
     except Exception as e:
         logging.error(f"Error getting users: {e}")
         await callback.answer("❌ Foydalanuvchilarni olishda xatolik")
+
+
+async def show_users_page(message, session: AsyncSession, users: list = None, page: int = 0, edit: bool = False):
+    """Foydalanuvchilarni sahifa bo'lib ko'rsatish"""
+    try:
+        if users is None:
+            users = await orm_get_all_users(session)
+        
+        if not users:
+            text = "🚫 Hech qanday foydalanuvchi topilmadi"
+            keyboard = get_back_to_admin_menu_kb()
+            
+            if edit:
+                await message.edit_text(text, reply_markup=keyboard)
+            else:
+                await message.answer(text, reply_markup=keyboard)
+            return
+        
+        # Pagination settings
+        USERS_PER_PAGE = 10
+        total_users = len(users)
+        total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+        
+        # Current page bounds
+        start_idx = page * USERS_PER_PAGE
+        end_idx = min(start_idx + USERS_PER_PAGE, total_users)
+        current_users = users[start_idx:end_idx]
+        
+        # Build text
+        text = f"👥 <b>Foydalanuvchilar ro'yxati</b>\n\n"
+        text += f"📊 Jami: <b>{total_users}</b> ta foydalanuvchi\n"
+        text += f"📄 Sahifa: <b>{page + 1}</b> / <b>{total_pages}</b>\n\n"
+        
+        for i, user in enumerate(current_users, start=start_idx + 1):
+            text += f"<b>{i}.</b> "
+            text += f"👤 {user.full_name or 'Nomsiz'}\n"
+            text += f"🆔 ID: <code>{user.user_id}</code>\n"
+            
+            if user.phone:
+                text += f"📞 {user.phone}\n"
+            
+            # User statistics
+            stats = await orm_get_user_funnel_stats(session, user.user_id)
+            if stats and stats.get('total_started', 0) > 0:
+                text += f"📊 Voronkalar: {stats.get('total_completed', 0)}/{stats.get('total_started', 0)} ({stats.get('completion_rate', 0)}%)\n"
+            
+            text += f"📅 Ro'yxat: {user.created.strftime('%d.%m.%Y')}\n"
+            text += f"⏰ Oxirgi: {user.updated.strftime('%d.%m.%Y')}\n\n"
+        
+        # Create pagination keyboard
+        from aiogram.types import InlineKeyboardButton
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        
+        builder = InlineKeyboardBuilder()
+        
+        # Page numbers navigation (like website pagination)
+        if total_pages > 1:
+            # Show first page if not on first page and there are more than 3 pages
+            if page > 0 and total_pages > 3:
+                builder.add(InlineKeyboardButton(text="1", callback_data="users_page:0"))
+                if page > 2:
+                    builder.add(InlineKeyboardButton(text="...", callback_data="noop"))
+            
+            # Show current page and adjacent pages
+            start_page = max(0, page - 1)
+            end_page = min(total_pages, page + 2)
+            
+            for p in range(start_page, end_page):
+                if p == page:
+                    # Current page (highlighted)
+                    builder.add(InlineKeyboardButton(text=f"• {p + 1} •", callback_data="noop"))
+                else:
+                    builder.add(InlineKeyboardButton(text=str(p + 1), callback_data=f"users_page:{p}"))
+            
+            # Show last page if not on last page and there are more than 3 pages
+            if page < total_pages - 1 and total_pages > 3:
+                if page < total_pages - 3:
+                    builder.add(InlineKeyboardButton(text="...", callback_data="noop"))
+                builder.add(InlineKeyboardButton(text=str(total_pages), callback_data=f"users_page:{total_pages-1}"))
+        
+        # Add a row separator
+        if total_pages > 1:
+            builder.row()
+        
+        # Navigation buttons
+        if page > 0:
+            builder.add(InlineKeyboardButton(
+                text="⬅️ Oldingi",
+                callback_data=f"users_page:{page-1}"
+            ))
+        
+        if page < total_pages - 1:
+            builder.add(InlineKeyboardButton(
+                text="Keyingi ➡️",
+                callback_data=f"users_page:{page+1}"
+            ))
+        
+        # Back button
+        builder.row()
+        builder.add(InlineKeyboardButton(
+            text="🔙 Orqaga",
+            callback_data="back_to_admin_menu"
+        ))
+        
+        if edit:
+            await message.edit_text(text, reply_markup=builder.as_markup())
+        else:
+            await message.answer(text, reply_markup=builder.as_markup())
+            
+    except Exception as e:
+        logging.error(f"Error showing users page: {e}")
+        if edit:
+            await message.edit_text("❌ Xatolik yuz berdi", reply_markup=get_back_to_admin_menu_kb())
+        else:
+            await message.answer("❌ Xatolik yuz berdi", reply_markup=get_back_to_admin_menu_kb())
 
 
 @admin_router.callback_query(F.data == "admin_broadcast")
@@ -414,11 +517,81 @@ async def subscriptions_list_callback(callback: CallbackQuery, session: AsyncSes
                 text += f"⏱ Tugash: {sub.expires_at.strftime('%d.%m.%Y %H:%M')}\n"
                 text += f"✅ To'langan: {'Ha' if sub.payment_verified else 'Yoq'}\n\n"
         
-        await callback.message.edit_text(text, reply_markup=get_admin_menu_kb())
+        await callback.message.edit_text(text, reply_markup=get_back_to_admin_menu_kb())
         await callback.answer()
     except Exception as e:
         logging.error(f"Error getting subscriptions: {e}")
         await callback.answer("❌ Obunalar ro'yxatini olishda xatolik")
+
+
+@admin_router.callback_query(F.data == "admin_plans_list")
+async def admin_plans_list_callback(callback: CallbackQuery, session: AsyncSession):
+    """Тарифлар рўйхати"""
+    try:
+        plans = await orm_get_active_subscription_plans(session)
+        
+        if not plans:
+            text = "🚫 Hech qanday tarif topilmadi.\n\nYangi tarif yaratish uchun pastdagi tugmani bosing."
+        else:
+            text = f"📋 <b>Tariflar ro'yxati ({len(plans)}):</b>\n\n"
+            
+            for plan in plans:
+                text += f"💎 <b>{plan.name}</b>\n"
+                text += f"💰 Narx: ${plan.price_usd}\n"
+                text += f"⏱ Muddati: {plan.duration_days} kun\n"
+                text += f"📝 Tavsif: {plan.description}\n"
+                text += f"✅ Holati: {'Faol' if plan.is_active else 'Nofaol'}\n\n"
+        
+        await callback.message.edit_text(text, reply_markup=get_subscriptions_list_kb(plans))
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error getting plans list: {e}")
+        await callback.answer("❌ Tariflar ro'yxatini olishda xatolik")
+
+
+@admin_router.callback_query(F.data == "admin_add_plan")
+async def admin_add_plan_callback(callback: CallbackQuery, state: FSMContext):
+    """Янги тариф қўшиш"""
+    await state.set_state(SubscriptionPlanStates.waiting_for_name)
+    
+    await callback.message.edit_text(
+        "💰 <b>Yangi tarif yaratish</b>\n\n"
+        "Tarif nomini kiriting:",
+        reply_markup=get_cancel_add_plan_kb()
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admin_subscription_stats")
+async def admin_subscription_stats_callback(callback: CallbackQuery, session: AsyncSession):
+    """Обуналар статистикаси"""
+    try:
+        from database.orm_query import select, Subscription, SubscriptionPlan, func
+        
+        # Жами обуналар сони
+        total_subs = await session.scalar(select(func.count(Subscription.id)))
+        
+        # Фаол обуналар сони  
+        active_subs = await session.scalar(
+            select(func.count(Subscription.id)).where(Subscription.is_active == True)
+        )
+        
+        # Тўланган обуналар сони
+        paid_subs = await session.scalar(
+            select(func.count(Subscription.id)).where(Subscription.payment_verified == True)
+        )
+        
+        text = f"📊 <b>Obunalar statistikasi</b>\n\n"
+        text += f"📋 Jami obunalar: <b>{total_subs or 0}</b>\n"
+        text += f"✅ Faol obunalar: <b>{active_subs or 0}</b>\n"
+        text += f"💳 To'langan obunalar: <b>{paid_subs or 0}</b>\n"
+        text += f"📅 So'ngi yangilanish: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        
+        await callback.message.edit_text(text, reply_markup=get_back_to_admin_menu_kb())
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error getting subscription stats: {e}")
+        await callback.answer("❌ Statistikani olishda xatolik")
 
 
 # ===================== NAVIGATION CALLBACK ХЕНДЛЕРЫ =====================
@@ -501,21 +674,17 @@ async def users_pagination_handler(callback: CallbackQuery, session: AsyncSessio
     """Pagination для списка пользователей"""
     try:
         page = int(callback.data.split(":")[1])
-        users = await orm_get_all_users(session)
-        
-        if users:
-            text = f"👥 <b>Foydalanuvchilar ro'yxati</b>\n\n"
-            text += f"📊 Jami: <b>{len(users)}</b> ta foydalanuvchi\n\n"
-            text += "Profil ko'rish uchun ismga bosing:"
-            
-            await callback.message.edit_text(
-                text,
-                reply_markup=get_users_list_kb(users, page=page)
-            )
+        await show_users_page(callback.message, session, page=page, edit=True)
         await callback.answer()
     except Exception as e:
         logging.error(f"Error in users pagination: {e}")
-        await callback.answer("❌ Xatolik yuz berdi")
+        await callback.answer("Xatolik yuz berdi", show_alert=True)
+
+
+@admin_router.callback_query(F.data == "noop")
+async def noop_handler(callback: CallbackQuery):
+    """Dummy handler for non-clickable buttons"""
+    await callback.answer()
 
 
 @admin_router.callback_query(F.data.startswith("user_profile:"))

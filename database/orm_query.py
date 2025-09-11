@@ -45,9 +45,33 @@ async def orm_get_users_count(session: AsyncSession) -> int:
 
 async def orm_get_all_users(session: AsyncSession) -> list[User]:
     """Barcha foydalanuvchilarni olish"""
-    query = select(User).order_by(User.created_at.desc())
+    query = select(User).order_by(User.created.desc())
     result = await session.execute(query)
     return result.scalars().all()
+
+
+async def orm_get_user_funnel_stats(session: AsyncSession, user_id: int) -> Dict[str, Any]:
+    """Foydalanuvchi uchun funnel statistikasini olish"""
+    # Jami boshlangan funnellar soni
+    total_query = select(func.count(FunnelStatistic.id)).where(
+        FunnelStatistic.user_id == user_id
+    )
+    total_result = await session.execute(total_query)
+    total_started = total_result.scalar() or 0
+    
+    # Yakunlangan funnellar soni
+    completed_query = select(func.count(FunnelStatistic.id)).where(
+        FunnelStatistic.user_id == user_id,
+        FunnelStatistic.completed == True
+    )
+    completed_result = await session.execute(completed_query)
+    total_completed = completed_result.scalar() or 0
+    
+    return {
+        'total_started': total_started,
+        'total_completed': total_completed,
+        'completion_rate': round(total_completed / total_started * 100, 1) if total_started > 0 else 0
+    }
 
 
 # Funnel operations

@@ -256,6 +256,23 @@ def get_back_to_admin_menu_kb():
     return builder.as_markup()
 
 
+def get_cancel_add_plan_kb():
+    """Клавиатура для отмены добавления тарифа"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(InlineKeyboardButton(
+        text="❌ Bekor qilish",
+        callback_data="cancel_subscription_creation"
+    ))
+    
+    builder.add(InlineKeyboardButton(
+        text="🔙 Admin menyuga qaytish",
+        callback_data="back_to_admin_menu"
+    ))
+    
+    return builder.as_markup()
+
+
 def get_back_to_menu_kb():
     """Клавиатура для возврата в главное меню"""
     builder = InlineKeyboardBuilder()
@@ -440,12 +457,12 @@ def get_subscriptions_list_kb(plans):
     
     builder.add(InlineKeyboardButton(
         text="➕ Yangi tarif yaratish",
-        callback_data="admin_create_subscription"
+        callback_data="admin_add_plan"
     ))
     
     builder.add(InlineKeyboardButton(
-        text="🔙 Admin paneliga",
-        callback_data="back_to_admin_menu"
+        text="🔙 Orqaga",
+        callback_data="admin_tariffs"
     ))
     
     builder.adjust(1)
